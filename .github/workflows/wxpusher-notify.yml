@@ -44,11 +44,11 @@ jobs:
           daily_only = os.environ.get("DAILY_SUCCESS_ONLY") == "1"
           repo = os.environ["REPO"]
           run_id = os.environ.get("RUN_ID","").strip()
+          from_event = bool(run_id)
           conclusion = os.environ.get("CONCLUSION","").strip()
           started = os.environ.get("RUN_STARTED","").strip()
 
-          from_event = bool(run_id)
-if not run_id:
+          if not from_event:
               wf = os.environ["MAIN_WF"]
               out = subprocess.check_output(["gh","api",f"repos/{repo}/actions/workflows/{wf}/runs?per_page=1"]).decode()
               r = json.loads(out)["workflow_runs"][0]
@@ -57,7 +57,7 @@ if not run_id:
           if daily_only and from_event and conclusion == "success":
               h = datetime.fromisoformat(started.replace("Z","+00:00")).hour
               if h != 0:
-                  print(f"skip success push: run hour={h} UTC, daily summary already sent or pending")
+                  print(f"skip success push: run hour={h} UTC, daily slot only (hour=0)")
                   raise SystemExit(0)
 
           subprocess.run(["gh","api",f"repos/{repo}/actions/runs/{run_id}/logs"],
@@ -80,9 +80,9 @@ if not run_id:
           cst = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
           ok = (conclusion == "success")
           icon = "\u2705" if ok else "\u274c"
-          verb = "成功" if ok else f"失败（{conclusion or 'unknown'}）"
-          summary = f"{icon} {name} 签到{verb} | {cst}"[:100]
-          content = f"{icon} {name} 签到{verb}\n时间：{cst}（北京时间）\n\n关键日志：\n{detail}"
+          verb = "\u6210\u529f" if ok else f"\u5931\u8d25\uff08{conclusion or 'unknown'}\uff09"
+          summary = f"{icon} {name} \u7b7e\u5230{verb} | {cst}"[:100]
+          content = f"{icon} {name} \u7b7e\u5230{verb}\n\u65f6\u95f4\uff1a{cst}\uff08\u5317\u4eac\u65f6\u95f4\uff09\n\n\u5173\u952e\u65e5\u5fd7\uff1a\n{detail}"
 
           body = {"appToken": app, "content": content, "summary": summary, "contentType": 1, "uids": uids}
           rq = urllib.request.Request("https://wxpusher.zjiecode.com/api/send/message",
