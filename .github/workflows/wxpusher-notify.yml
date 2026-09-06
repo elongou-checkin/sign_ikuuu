@@ -1,0 +1,93 @@
+name: WxPusher 通知
+
+on:
+  workflow_run:
+    workflows: ["Auto Sign-in for BBS"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  actions: read
+
+concurrency:
+  group: wxpusher-notify-${{ github.event.workflow_run.id || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TITLE_NAME: "ikuuu"
+      MAIN_WF: "sign_ikuuu.yml"
+      KEYWORDS: "签到|登录|成功|失败|Cookie|积分|ERROR"
+      DAILY_SUCCESS_ONLY: "0"
+      REPO: ${{ github.repository }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+      RUN_STARTED: ${{ github.event.workflow_run.run_started_at }}
+    steps:
+      - name: 拉取日志并推送 WxPusher
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WXPUSHER_APP_TOKEN: ${{ secrets.WXPUSHER_APP_TOKEN }}
+          WXPUSHER_UIDS: ${{ secrets.WXPUSHER_UIDS }}
+        run: |
+          python3 - <<'PYEOF'
+          import os, json, re, subprocess, zipfile, io, urllib.request
+          from datetime import datetime, timezone, timedelta
+
+          app = os.environ["WXPUSHER_APP_TOKEN"]
+          uids = [u.strip() for u in os.environ.get("WXPUSHER_UIDS","").split(",") if u.strip()]
+          name = os.environ["TITLE_NAME"]
+          keywords = os.environ["KEYWORDS"].split("|")
+          daily_only = os.environ.get("DAILY_SUCCESS_ONLY") == "1"
+          repo = os.environ["REPO"]
+          run_id = os.environ.get("RUN_ID","").strip()
+          conclusion = os.environ.get("CONCLUSION","").strip()
+          started = os.environ.get("RUN_STARTED","").strip()
+
+          if not run_id:
+              wf = os.environ["MAIN_WF"]
+              out = subprocess.check_output(["gh","api",f"repos/{repo}/actions/workflows/{wf}/runs?per_page=1"]).decode()
+              r = json.loads(out)["workflow_runs"][0]
+              run_id, conclusion, started = str(r["id"]), r["conclusion"], r["run_started_at"]
+
+          if daily_only and conclusion == "success":
+              h = datetime.fromisoformat(started.replace("Z","+00:00")).hour
+              if h != 0:
+                  print(f"skip success push: run hour={h} UTC, daily summary already sent or pending")
+                  raise SystemExit(0)
+
+          subprocess.run(["gh","api",f"repos/{repo}/actions/runs/{run_id}/logs"],
+                         stdout=open("logs.zip","wb"), check=True)
+          z = zipfile.ZipFile("logs.zip")
+          ansi = re.compile(r"\x1b\[[0-9;]*m")
+          hits = []
+          for n in z.namelist():
+              if not n.endswith(".txt"):
+                  continue
+              for line in z.read(n).decode("utf-8", errors="replace").splitlines():
+                  if "token:" in line or "node_modules" in line or line.startswith("##["):
+                      continue
+                  if any(k in line for k in keywords):
+                      clean = ansi.sub("", line.split("Z ",1)[-1].strip())[:200]
+                      if clean and clean not in hits:
+                          hits.append(clean)
+          detail = "\n".join(hits[:15]) or "(no key log lines)"
+
+          cst = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
+          ok = (conclusion == "success")
+          icon = "\u2705" if ok else "\u274c"
+          verb = "success" if ok else f"failed ({conclusion or 'unknown'})"
+          summary = f"{icon} {name} checkin {verb} | {cst}"[:100]
+          content = f"{icon} {name} checkin {verb}\ntime: {cst} (UTC+8)\n\nkey logs:\n{detail}"
+
+          body = {"appToken": app, "content": content, "summary": summary, "contentType": 1, "uids": uids}
+          rq = urllib.request.Request("https://wxpusher.zjiecode.com/api/send/message",
+              data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+          resp = json.loads(urllib.request.urlopen(rq, timeout=30).read().decode())
+          print("wxpusher:", resp.get("code"), resp.get("msg"))
+          if resp.get("code") != 1000:
+              raise SystemExit(1)
+          PYEOF
